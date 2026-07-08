@@ -1,0 +1,20 @@
+version: '3.9'
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sans_backend_dev
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///./dev.db
+      DATABASE_SYNC_URL: sqlite:///./dev.db
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ${SECRET_KEY:-dev-secret}
+      ENVIRONMENT: development
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - ./backend:/app
+      - ./backend/uploads:/app/uploads
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

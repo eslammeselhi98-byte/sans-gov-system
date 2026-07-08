@@ -1,0 +1,241 @@
+version: '3.9'
+
+name: sans-pms
+
+services:
+
+  # ─────────────────────────────────────────
+  # PostgreSQL Database
+  # ─────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: sans_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-sans_pms}
+      POSTGRES_USER: ${DB_USER:-sans_admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+      - ./database/backups:/backups
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sans_admin} -d ${DB_NAME:-sans_pms}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sans_net
+
+  # ─────────────────────────────────────────
+  # Redis Cache
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: sans_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-sans_redis_pass} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:-sans_redis_pass}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sans_net
+
+  # ─────────────────────────────────────────
+  # FastAPI Backend
+  # ─────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sans_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-sans_admin}:${DB_PASSWORD}@db:5432/${DB_NAME:-sans_pms}
+      DATABASE_SYNC_URL: postgresql://${DB_USER:-sans_admin}:${DB_PASSWORD}@db:5432/${DB_NAME:-sans_pms}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-sans_redis_pass}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      UPLOAD_DIR: /app/uploads
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      COMPANY_ID: ${COMPANY_ID:-00000000-0000-0000-0000-000000000001}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@sans-intl.com}
+    volumes:
+      - uploads_data:/app/uploads
+      - ./database/backups:/app/backups
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - sans_net
+
+  # ─────────────────────────────────────────
+  # Celery Worker (background tasks)
+  # ─────────────────────────────────────────
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sans_celery
+    restart: unless-stopped
+    command: celery -A tasks.celery_app worker --loglevel=info --concurrency=2 -Q default,reports,ai,backups
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-sans_admin}:${DB_PASSWORD}@db:5432/${DB_NAME:-sans_pms}
+      DATABASE_SYNC_URL: postgresql://${DB_USER:-sans_admin}:${DB_PASSWORD}@db:5432/${DB_NAME:-sans_pms}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-sans_redis_pass}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      UPLOAD_DIR: /app/uploads
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+    volumes:
+      - uploads_data:/app/uploads
+      - ./database/backups:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - sans_net
+
+  # ─────────────────────────────────────────
+  # Celery Beat (scheduled tasks)
+  # ─────────────────────────────────────────
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sans_beat
+    restart: unless-stopped
+    command: celery -A tasks.celery_app beat --loglevel=info --scheduler redbeat.RedBeatScheduler
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-sans_admin}:${DB_PASSWORD}@db:5432/${DB_NAME:-sans_pms}
+      DATABASE_SYNC_URL: postgresql://${DB_USER:-sans_admin}:${DB_PASSWORD}@db:5432/${DB_NAME:-sans_pms}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-sans_redis_pass}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+    depends_on:
+      - redis
+      - db
+    networks:
+      - sans_net
+
+  # ─────────────────────────────────────────
+  # Next.js Frontend
+  # ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:8000/api}
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-SANS PMS}
+    container_name: sans_frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:8000/api}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+    networks:
+      - sans_net
+
+  # ─────────────────────────────────────────
+  # Nginx Reverse Proxy
+  # ─────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: sans_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - uploads_data:/var/www/uploads:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - sans_net
+
+  # ─────────────────────────────────────────
+  # pgAdmin (Database Manager UI)
+  # ─────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: sans_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@sans-intl.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-Admin@123}
+      PGADMIN_CONFIG_SERVER_MODE: 'True'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - sans_net
+    profiles:
+      - tools
+
+# ─────────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  nginx_logs:
+    driver: local
+
+# ─────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────
+networks:
+  sans_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

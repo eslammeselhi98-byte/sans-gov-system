@@ -1,0 +1,16 @@
+[Unit]
+Description=SANS PMS backend service
+After=network.target
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+WorkingDirectory=/var/www/sans-pms/backend
+EnvironmentFile=/var/www/sans-pms/.env
+ExecStart=/usr/bin/env python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
