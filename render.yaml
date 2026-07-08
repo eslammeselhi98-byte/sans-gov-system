@@ -2,12 +2,11 @@ services:
   - type: web
     name: sans-gov-backend
     runtime: node
-    repo: https://github.com/eslammeselhi98-byte/sans-gov-system  # ضع اسم المستخدم الصحيح هنا
     plan: free
     buildCommand: npm install
     startCommand: npm start
     envVars:
       - key: DATABASE_URL
-        sync: false   # يجب أن تكون تحت - key بنفس مستوى المسافة البادئة
+        sync: false
       - key: PORT
         value: 10000
